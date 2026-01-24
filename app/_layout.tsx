@@ -15,6 +15,7 @@ const RootLayout: React.FC = () => {
           <Stack.Screen name="forgot-password" />
           <Stack.Screen name="(auth)" />
           <Stack. Screen name="(member)" />
+          <Stack.Screen name="(admin)" />
         </Stack>
       </GluestackUIProvider>
     </AuthProvider>
