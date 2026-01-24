@@ -84,20 +84,28 @@ const handleLogin = async (): Promise<void> => {
     
     const userCred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
     
-    // Fetch user data to check enrollment status
-    const userDoc = await getDoc(doc(db, 'users', userCred.user. uid));
+    // Fetch user data to check role and enrollment status
+    const userDoc = await getDoc(doc(db, 'users', userCred.user.uid));
     
     if (userDoc.exists()) {
       const userData = userDoc.data();
+      const userRole = userData.role || 'member';
       
-      if (userData. enrollmentStatus === 'approved') {
-        // User is approved, go to member dashboard
+      // Route based on user role
+      if (userRole === 'superAdmin') {
+        // Super admin goes to super admin dashboard
+        router.replace('/(admin)/super-admin-home' as any);
+      } else if (userRole === 'gymAdmin') {
+        // Gym admin goes to admin dashboard
+        router.replace('/(admin)/home' as any);
+      } else if (userData. enrollmentStatus === 'approved') {
+        // Regular member with approved enrollment
         router.replace('/(member)/home' as any);
       } else if (userData.enrollmentStatus === 'pending') {
-        // User has pending enrollment
+        // Member with pending enrollment
         router.replace('/(auth)/pending-approval' as any);
       } else {
-        // User needs to select gym
+        // Member needs to select gym
         router.replace('/(auth)/gym-selection' as any);
       }
     } else {

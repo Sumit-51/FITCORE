@@ -5,7 +5,7 @@ import { ActivityIndicator, View } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 
 const MemberLayout: React.FC = () => {
-  const { user, loading } = useAuth();
+  const { user, userData, loading } = useAuth();
 
   if (loading) {
     return (
@@ -17,6 +17,15 @@ const MemberLayout: React.FC = () => {
 
   if (!user) {
     return <Redirect href="/login" />;
+  }
+
+  // Redirect admins to their appropriate dashboard
+  if (userData?.role === 'gymAdmin') {
+    return <Redirect href="/(admin)/home" />;
+  }
+
+  if (userData?.role === 'superAdmin') {
+    return <Redirect href="/(admin)/super-admin-home" />;
   }
 
   return (
