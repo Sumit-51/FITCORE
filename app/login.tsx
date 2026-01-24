@@ -85,7 +85,7 @@ const handleLogin = async (): Promise<void> => {
     const userCred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
     
     // Fetch user data to check role and enrollment status
-    const userDoc = await getDoc(doc(db, 'users', userCred.user. uid));
+    const userDoc = await getDoc(doc(db, 'users', userCred.user.uid));
     
     if (userDoc.exists()) {
       const userData = userDoc.data();

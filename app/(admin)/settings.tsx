@@ -80,6 +80,20 @@ const AdminSettings: React.FC = () => {
       return;
     }
 
+    // Validate email format
+    const emailRegex = /\S+@\S+\.\S+/;
+    if (!emailRegex.test(email.trim())) {
+      Alert.alert('Error', 'Please enter a valid email address');
+      return;
+    }
+
+    // Validate phone format (basic validation for digits)
+    const phoneRegex = /^\+?[\d\s-()]{10,}$/;
+    if (!phoneRegex.test(phone.trim())) {
+      Alert.alert('Error', 'Please enter a valid phone number');
+      return;
+    }
+
     const fee = parseFloat(monthlyFee);
     if (isNaN(fee) || fee <= 0) {
       Alert.alert('Error', 'Please enter a valid monthly fee');
