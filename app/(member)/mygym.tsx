@@ -1,0 +1,1979 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
+} from "firebase/firestore";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  Modal,
+  Platform,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { useAuth } from "../context/AuthContext";
+import { db } from "../lib/firebase";
+import { Gym, IssueType, ReportStatus } from "../types/index";
+
+const { width, height } = Dimensions.get("window");
+const isSmall = height < 700;
+
+const MyGym: React.FC = () => {
+  const { userData, refreshUserData } = useAuth();
+  const router = useRouter();
+  const [gym, setGym] = useState<Gym | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [isCheckedIn, setIsCheckedIn] = useState<boolean>(false);
+  const [timerSeconds, setTimerSeconds] = useState<number>(0);
+  const [streak, setStreak] = useState<number>(0);
+  const [totalDuration, setTotalDuration] = useState<number>(0);
+  const timerRef = useRef<number | null>(null);
+
+  const [checkInConfirm, setCheckInConfirm] = useState<boolean>(false);
+  const [checkOutConfirm, setCheckOutConfirm] = useState<boolean>(false);
+
+  const [showReportModal, setShowReportModal] = useState<boolean>(false);
+  const [selectedIssues, setSelectedIssues] = useState<IssueType[]>([]);
+  const [reportDescription, setReportDescription] = useState<string>("");
+  const [submittingReport, setSubmittingReport] = useState<boolean>(false);
+
+  const [checkoutSuccess, setCheckoutSuccess] = useState<boolean>(false);
+
+  const [activeCheckInsCount, setActiveCheckInsCount] = useState<number>(0);
+  const [currentTimeSlot, setCurrentTimeSlot] = useState<
+    "Morning" | "Evening" | "Night"
+  >("Morning");
+
+  const [showPlanDetailsModal, setShowPlanDetailsModal] =
+    useState<boolean>(false);
+
+  const [initialLoadDone, setInitialLoadDone] = useState<boolean>(false);
+  const [checkInStartTime, setCheckInStartTime] = useState<Date | null>(null);
+
+  useEffect(() => {
+    if (userData && !initialLoadDone) {
+      checkEnrollmentAndFetchGym();
+      setInitialLoadDone(true);
+    }
+  }, [userData]);
+
+  useEffect(() => {
+    const now = new Date();
+    const currentHour = now.getHours();
+    if (currentHour >= 6 && currentHour < 16) {
+      setCurrentTimeSlot("Morning");
+    } else if (currentHour >= 16 && currentHour < 21) {
+      setCurrentTimeSlot("Evening");
+    } else {
+      setCurrentTimeSlot("Night");
+    }
+  }, []);
+
+  const checkEnrollmentAndFetchGym = async () => {
+    if (userData?.enrollmentStatus === "approved" && userData?.gymId) {
+      await fetchGymData(userData.gymId);
+      await loadUserStats();
+    } else {
+      setLoading(false);
+    }
+  };
+
+  const fetchGymData = async (gymId: string) => {
+    try {
+      const gymDoc = await getDoc(doc(db, "gyms", gymId));
+      if (gymDoc.exists()) {
+        const gymData = {
+          id: gymDoc.id,
+          ...gymDoc.data(),
+          createdAt: gymDoc.data().createdAt?.toDate() || new Date(),
+        } as Gym;
+        setGym(gymData);
+        fetchActiveCheckInsCount(gymId);
+      }
+    } catch (error) {
+      console.error("Error fetching gym:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchActiveCheckInsCount = async (gymId: string) => {
+    try {
+      const activeCheckInsRef = collection(db, "activeCheckIns");
+      const q = query(activeCheckInsRef, where("gymId", "==", gymId));
+      const querySnapshot = await getDocs(q);
+
+      setActiveCheckInsCount(querySnapshot.size);
+
+      if (userData?.uid) {
+        const userCheckInDoc = querySnapshot.docs.find(
+          (doc) => doc.id === userData.uid,
+        );
+
+        if (userCheckInDoc) {
+          setIsCheckedIn(true);
+          const checkInData = userCheckInDoc.data();
+          const checkInTime = checkInData.checkInTime?.toDate();
+
+          if (checkInTime) {
+            setCheckInStartTime(checkInTime);
+
+            const now = new Date();
+            const elapsedSeconds = Math.max(
+              0,
+              Math.floor((now.getTime() - checkInTime.getTime()) / 1000),
+            );
+
+            setTimerSeconds(elapsedSeconds);
+
+            if (!timerRef.current) {
+              timerRef.current = setInterval(
+                () =>
+                  setTimerSeconds((prev) => {
+                    return Math.max(0, prev + 1);
+                  }),
+                1000,
+              );
+            }
+          }
+        } else {
+          setIsCheckedIn(false);
+          setTimerSeconds(0);
+          setCheckInStartTime(null);
+        }
+      }
+    } catch (error: any) {
+      console.error("Error fetching active check-ins:", error.message);
+      setActiveCheckInsCount(0);
+    }
+  };
+
+  const loadUserStats = async () => {
+    try {
+      if (!userData?.uid) return;
+
+      const userDoc = await getDoc(doc(db, "users", userData.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        const firebaseStreak = Number(data.streak) || 0;
+        const firebaseDuration = Number(data.totalDuration) || 0;
+
+        setStreak(firebaseStreak);
+        setTotalDuration(firebaseDuration);
+      }
+    } catch (error) {
+      console.error("Error loading stats:", error);
+    }
+  };
+
+  const updateUserStatsInFirebase = async (
+    streakValue: number,
+    totalDurationValue: number,
+  ) => {
+    if (!userData?.uid) return;
+
+    try {
+      await updateDoc(doc(db, "users", userData.uid), {
+        streak: streakValue,
+        totalDuration: totalDurationValue,
+        statsUpdatedAt: serverTimestamp(),
+      });
+      console.log("✅ User stats updated in Firebase:", {
+        streak: streakValue,
+        totalDuration: totalDurationValue,
+      });
+    } catch (error) {
+      console.error("Error updating user stats in Firebase:", error);
+    }
+  };
+
+  // FIXED STREAK LOGIC - Handles midnight crossovers correctly
+  const calculateStreak = async (): Promise<number> => {
+    if (!userData?.uid) return 1;
+
+    try {
+      const checkInHistoryRef = collection(db, "checkInHistory");
+      const userCheckInsQuery = query(
+        checkInHistoryRef,
+        where("userId", "==", userData.uid),
+      );
+      const querySnapshot = await getDocs(userCheckInsQuery);
+
+      if (querySnapshot.empty) return 1;
+
+      // Get ALL unique check-in dates (handles both date field and timestamps)
+      const checkInDates = new Set<string>();
+
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+
+        // Priority 1: Use the date field if it exists
+        if (data.date && typeof data.date === "string") {
+          checkInDates.add(data.date);
+        }
+        // Priority 2: Extract date from checkOutTime
+        else if (data.checkOutTime) {
+          try {
+            const checkOutDate = data.checkOutTime.toDate();
+            // Convert to LOCAL date (not UTC)
+            const localDate = new Date(
+              checkOutDate.getFullYear(),
+              checkOutDate.getMonth(),
+              checkOutDate.getDate(),
+            );
+            const dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+            checkInDates.add(dateStr);
+          } catch (e) {
+            console.warn("Could not parse checkOutTime:", e);
+          }
+        }
+        // Priority 3: Extract date from checkInTime
+        else if (data.checkInTime) {
+          try {
+            const checkInDate = data.checkInTime.toDate();
+            const localDate = new Date(
+              checkInDate.getFullYear(),
+              checkInDate.getMonth(),
+              checkInDate.getDate(),
+            );
+            const dateStr = `${localDate.getFullYear()}-${String(localDate.getMonth() + 1).padStart(2, "0")}-${String(localDate.getDate()).padStart(2, "0")}`;
+            checkInDates.add(dateStr);
+          } catch (e) {
+            console.warn("Could not parse checkInTime:", e);
+          }
+        }
+      });
+
+      // Convert to sorted array (newest first)
+      const sortedDates = Array.from(checkInDates).sort().reverse();
+      console.log("📅 All check-in dates:", sortedDates);
+
+      // Get TODAY'S date in LOCAL timezone
+      const now = new Date();
+      const todayLocal = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      );
+      const todayStr = `${todayLocal.getFullYear()}-${String(todayLocal.getMonth() + 1).padStart(2, "0")}-${String(todayLocal.getDate()).padStart(2, "0")}`;
+
+      // Get YESTERDAY'S date
+      const yesterday = new Date(todayLocal);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
+
+      console.log("🗓️ Today:", todayStr, "| Yesterday:", yesterdayStr);
+
+      // Check if user already checked in today
+      const checkedInToday = sortedDates.includes(todayStr);
+      const checkedInYesterday = sortedDates.includes(yesterdayStr);
+
+      console.log("✅ Checked in today?", checkedInToday);
+      console.log("✅ Checked in yesterday?", checkedInYesterday);
+
+      // If already checked in today, calculate current streak
+      if (checkedInToday) {
+        let streakCount = 0;
+        let currentDate = new Date(todayLocal);
+
+        // Count consecutive days backwards from today
+        while (true) {
+          const dateString = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
+          if (sortedDates.includes(dateString)) {
+            streakCount++;
+            currentDate.setDate(currentDate.getDate() - 1);
+          } else {
+            break;
+          }
+        }
+
+        console.log(
+          "🔥 Current streak (already checked in today):",
+          streakCount,
+        );
+        return Math.max(streakCount, 1);
+      }
+
+      // If checking in for FIRST TIME today and checked in yesterday
+      if (checkedInYesterday) {
+        // Calculate streak from yesterday backwards
+        let streakCount = 0;
+        let currentDate = new Date(yesterday);
+
+        while (true) {
+          const dateString = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
+          if (sortedDates.includes(dateString)) {
+            streakCount++;
+            currentDate.setDate(currentDate.getDate() - 1);
+          } else {
+            break;
+          }
+        }
+
+        // Add 1 for today's new check-in
+        const newStreak = streakCount + 1;
+        console.log("🔥 New streak (checked in yesterday):", newStreak);
+        return newStreak;
+      }
+
+      // No check-in yesterday, streak starts at 1
+      console.log("🔥 New streak (no check-in yesterday):", 1);
+      return 1;
+    } catch (error) {
+      console.error("❌ Error calculating streak:", error);
+      // Fallback: use existing streak + 1
+      return Math.max(streak + 1, 1);
+    }
+  };
+
+  const handleCheckInPress = () => {
+    if (!checkInConfirm) {
+      setCheckInConfirm(true);
+      setTimeout(() => setCheckInConfirm(false), 3000);
+    } else {
+      performCheckIn();
+      setCheckInConfirm(false);
+    }
+  };
+
+  const handleCheckOutPress = () => {
+    if (!checkOutConfirm) {
+      setCheckOutConfirm(true);
+      setCheckoutSuccess(false);
+      setTimeout(() => setCheckOutConfirm(false), 3000);
+    } else {
+      performCheckOut();
+      setCheckOutConfirm(false);
+    }
+  };
+
+  const performCheckIn = async () => {
+    const now = new Date();
+    setIsCheckedIn(true);
+    setCheckoutSuccess(false);
+    setCheckInStartTime(now);
+
+    // DON'T calculate streak here - the record doesn't exist yet!
+    // Streak will be calculated during checkout
+    console.log("✅ Check-in started, current streak:", streak);
+
+    // Start timer
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+    setTimerSeconds(0);
+    timerRef.current = setInterval(
+      () => setTimerSeconds((prev) => Math.max(0, prev + 1)),
+      1000,
+    );
+
+    // Track active check-in in Firestore
+    if (userData?.uid && userData?.gymId) {
+      try {
+        const currentHour = now.getHours();
+        let currentTimeSlot: "Morning" | "Evening" | "Night";
+
+        if (currentHour >= 6 && currentHour < 16) {
+          currentTimeSlot = "Morning";
+        } else if (currentHour >= 16 && currentHour < 21) {
+          currentTimeSlot = "Evening";
+        } else {
+          currentTimeSlot = "Night";
+        }
+
+        await setDoc(doc(db, "activeCheckIns", userData.uid), {
+          userId: userData.uid,
+          userName: userData.displayName || "User",
+          gymId: userData.gymId,
+          gymName: gym?.name || "Unknown Gym",
+          timeSlot: currentTimeSlot,
+          checkInTime: serverTimestamp(),
+          createdAt: serverTimestamp(),
+        });
+
+        if (gym?.id) {
+          fetchActiveCheckInsCount(gym.id);
+        }
+      } catch (error: any) {
+        console.error("Error tracking check-in:", error.message);
+        Alert.alert("Error", "Failed to check in. Please try again.");
+        setIsCheckedIn(false);
+        setCheckInStartTime(null);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        return;
+      }
+    }
+  };
+
+  const performCheckOut = async () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    const duration = timerSeconds;
+    const now = new Date();
+
+    // CRITICAL: Get LOCAL date (not UTC) for correct date tracking
+    const todayLocal = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const dateKey = `${todayLocal.getFullYear()}-${String(todayLocal.getMonth() + 1).padStart(2, "0")}-${String(todayLocal.getDate()).padStart(2, "0")}`;
+
+    console.log("🕒 Check-out time:", now.toLocaleString());
+    console.log("📅 Check-out date key (LOCAL):", dateKey);
+
+    const newTotalDuration = totalDuration + duration;
+    setTotalDuration(newTotalDuration);
+    setIsCheckedIn(false);
+    setCheckoutSuccess(true);
+
+    // Save to Firestore FIRST, then calculate streak
+    if (userData?.uid && userData?.gymId && checkInStartTime) {
+      try {
+        const currentHour = now.getHours();
+        let currentTimeSlot: "Morning" | "Evening" | "Night";
+
+        if (currentHour >= 6 && currentHour < 16) {
+          currentTimeSlot = "Morning";
+        } else if (currentHour >= 16 && currentHour < 21) {
+          currentTimeSlot = "Evening";
+        } else {
+          currentTimeSlot = "Night";
+        }
+
+        // FIXED: Ensure all required fields are saved
+        const checkInRecord = {
+          userId: userData.uid,
+          userName: userData.displayName || "User",
+          userEmail: userData.email || "",
+          gymId: userData.gymId,
+          gymName: gym?.name || "Unknown Gym", // FIX: Ensure gymName is never undefined
+          timeSlot: currentTimeSlot,
+          date: dateKey, // LOCAL DATE - This is what streak calculation uses
+          checkInTime: serverTimestamp(),
+          checkOutTime: serverTimestamp(),
+          duration: duration,
+          createdAt: serverTimestamp(),
+        };
+
+        console.log("💾 Saving check-in record:", {
+          ...checkInRecord,
+          checkInTime: "serverTimestamp",
+          checkOutTime: "serverTimestamp",
+          createdAt: "serverTimestamp",
+        });
+
+        // Save PERMANENT record with LOCAL date
+        await addDoc(collection(db, "checkInHistory"), checkInRecord);
+
+        // NOW calculate streak AFTER the record is saved
+        const newStreak = await calculateStreak();
+        console.log("🔥 Calculated new streak after checkout:", newStreak);
+        setStreak(newStreak);
+
+        // Update Firebase with new stats
+        await updateUserStatsInFirebase(newStreak, newTotalDuration);
+
+        // Remove from ACTIVE check-ins
+        await deleteDoc(doc(db, "activeCheckIns", userData.uid));
+
+        if (gym?.id) {
+          fetchActiveCheckInsCount(gym.id);
+        }
+
+        console.log("✅ Check-out completed successfully!");
+      } catch (error: any) {
+        console.error("❌ Error during check-out:", error.message);
+        Alert.alert(
+          "Error",
+          "Failed to save check-out record. Please try again.",
+        );
+        setIsCheckedIn(true);
+        if (checkInStartTime) {
+          timerRef.current = setInterval(
+            () => setTimerSeconds((prev) => Math.max(0, prev + 1)),
+            1000,
+          );
+        }
+        return;
+      }
+    }
+
+    setTimerSeconds(0);
+    setCheckInStartTime(null);
+
+    setTimeout(() => {
+      setCheckoutSuccess(false);
+    }, 5000);
+  };
+
+  const handleLeaveGym = () => {
+    Alert.alert(
+      "Leave Gym",
+      `Are you sure you want to leave ${gym?.name}?\n\n⚠️ WARNING: Your membership payment is non-refundable.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Leave Gym",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (!userData?.uid) return;
+
+              if (isCheckedIn) {
+                await performCheckOut();
+              }
+
+              await updateDoc(doc(db, "users", userData.uid), {
+                gymId: null,
+                enrollmentStatus: "none",
+                paymentMethod: null,
+                transactionId: null,
+                enrolledAt: null,
+                streak: 0,
+                totalDuration: 0,
+              });
+
+              await refreshUserData();
+              router.replace("/(member)/home");
+              Alert.alert(
+                "Success",
+                "You have left the gym. Browse the home page to find a new gym!",
+              );
+            } catch (error) {
+              console.error("Error leaving gym:", error);
+              Alert.alert("Error", "Failed to leave gym");
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleRefreshStatus = async () => {
+    await refreshUserData();
+    if (userData?.enrollmentStatus === "approved") {
+      Alert.alert("Approved!", "Your enrollment has been approved!");
+    } else {
+      Alert.alert("Still Pending", "Your enrollment is still pending approval");
+    }
+  };
+
+  const handleIssueToggle = (issue: IssueType) => {
+    if (selectedIssues.includes(issue)) {
+      setSelectedIssues(selectedIssues.filter((item) => item !== issue));
+    } else {
+      setSelectedIssues([...selectedIssues, issue]);
+    }
+  };
+
+  const handleSubmitReport = async () => {
+    if (selectedIssues.length === 0) {
+      Alert.alert("Error", "Please select at least one issue type");
+      return;
+    }
+    if (!reportDescription.trim()) {
+      Alert.alert("Error", "Please describe the issue(s)");
+      return;
+    }
+
+    setSubmittingReport(true);
+    try {
+      await addDoc(collection(db, "gymReports"), {
+        gymId: gym?.id,
+        gymName: gym?.name || "Unknown Gym",
+        userId: userData?.uid,
+        userName: userData?.displayName || "User",
+        userEmail: userData?.email || "",
+        issueTypes: selectedIssues,
+        description: reportDescription,
+        status: "pending" as ReportStatus,
+        createdAt: serverTimestamp(),
+      });
+
+      Alert.alert(
+        "Success",
+        "Your report has been submitted. The gym admin will review it shortly.",
+      );
+      setShowReportModal(false);
+      setSelectedIssues([]);
+      setReportDescription("");
+    } catch (error) {
+      console.error("Error submitting report:", error);
+      Alert.alert("Error", "Failed to submit report. Please try again.");
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
+  const formatTime = (seconds: number) => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    if (hrs > 0) {
+      return `${hrs}h ${mins}m ${secs}s`;
+    } else if (mins > 0) {
+      return `${mins}m ${secs}s`;
+    } else {
+      return `${secs}s`;
+    }
+  };
+
+  const getGreeting = (): string => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good Morning";
+    if (hour < 17) return "Good Afternoon";
+    return "Good Evening";
+  };
+
+  const getPlanName = (paymentMethod: string | undefined) => {
+    if (!paymentMethod) return "Not selected";
+    switch (paymentMethod) {
+      case "online":
+        return "Online Payment";
+      case "offline":
+        return "Pay at Gym (Offline)";
+      default:
+        return paymentMethod;
+    }
+  };
+
+  const getTimeSlotDisplay = (timeSlot: string | undefined | null) => {
+    if (!timeSlot) return "Not selected";
+    switch (timeSlot) {
+      case "Morning":
+        return "Morning (6 AM - 4 PM)";
+      case "Evening":
+        return "Evening (4 PM - 9 PM)";
+      case "Night":
+        return "Night (9 PM - 6 AM)";
+      default:
+        return timeSlot;
+    }
+  };
+
+  const getTimeSlotIcon = (timeSlot: string | undefined | null) => {
+    if (!timeSlot) return "time-outline";
+    switch (timeSlot) {
+      case "Morning":
+        return "sunny-outline";
+      case "Evening":
+        return "partly-sunny-outline";
+      case "Night":
+        return "moon-outline";
+      default:
+        return "time-outline";
+    }
+  };
+
+  const getTimeSlotColor = (timeSlot: string | undefined | null) => {
+    if (!timeSlot) return "#64748b";
+    switch (timeSlot) {
+      case "Morning":
+        return "#fbbf24";
+      case "Evening":
+        return "#f97316";
+      case "Night":
+        return "#8b5cf6";
+      default:
+        return "#64748b";
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    Alert.alert("Copied!", "Details copied to clipboard");
+  };
+
+  const renderPlanDetailsModal = () => (
+    <Modal
+      visible={showPlanDetailsModal}
+      transparent={true}
+      animationType="slide"
+      onRequestClose={() => setShowPlanDetailsModal(false)}
+    >
+      <View style={styles.planModalOverlay}>
+        <View style={styles.planModalContent}>
+          <View style={styles.planModalHeader}>
+            <Text style={styles.planModalTitle}>Your Enrollment Details</Text>
+            <TouchableOpacity
+              onPress={() => setShowPlanDetailsModal(false)}
+              style={styles.planModalCloseButton}
+            >
+              <Ionicons name="close" size={24} color="#e9eef7" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.planModalScroll}>
+            <View style={styles.planSection}>
+              <View style={styles.planSectionHeader}>
+                <Ionicons name="time-outline" size={20} color="#fbbf24" />
+                <Text style={styles.planSectionTitle}>Status</Text>
+              </View>
+              <View style={styles.statusBadgeContainer}>
+                <View style={styles.pendingStatusBadge}>
+                  <Ionicons name="time-outline" size={16} color="#fbbf24" />
+                  <Text style={styles.pendingStatusText}>Pending Approval</Text>
+                </View>
+                <Text style={styles.statusDescription}>
+                  Your enrollment request is under review by gym admin. You'll
+                  receive notification once approved.
+                </Text>
+              </View>
+            </View>
+
+            {gym && (
+              <View style={styles.planSection}>
+                <View style={styles.planSectionHeader}>
+                  <Ionicons name="barbell-outline" size={20} color="#4ade80" />
+                  <Text style={styles.planSectionTitle}>Gym Details</Text>
+                </View>
+                <View style={styles.detailCard}>
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Gym Name</Text>
+                    <Text style={styles.detailValue}>{gym.name}</Text>
+                  </View>
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Address</Text>
+                    <Text style={styles.detailValue}>{gym.address}</Text>
+                  </View>
+                  {gym.phone && (
+                    <View style={styles.detailRow}>
+                      <Text style={styles.detailLabel}>Phone</Text>
+                      <Text style={styles.detailValue}>{gym.phone}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            )}
+
+            <View style={styles.planSection}>
+              <View style={styles.planSectionHeader}>
+                <Ionicons name="card-outline" size={20} color="#3b82f6" />
+                <Text style={styles.planSectionTitle}>Plan Details</Text>
+              </View>
+              <View style={styles.detailCard}>
+                <View style={styles.detailRowWithIcon}>
+                  <View style={styles.iconCircleSmall}>
+                    <Ionicons
+                      name="calendar-outline"
+                      size={16}
+                      color="#4ade80"
+                    />
+                  </View>
+                  <View style={styles.detailContent}>
+                    <Text style={styles.detailLabel}>Plan Type</Text>
+                                        <Text style={styles.detailValue}>
+                      {userData?.planDuration
+                        ? `${userData.planDuration} month${userData.planDuration > 1 ? "s" : ""} Plan`
+                        : "Not selected"}
+                    </Text>
+                  </View>
+                </View>
+
+                {userData?.planDuration && (
+                  <View style={styles.detailRowWithIcon}>
+                    <View style={styles.iconCircleSmall}>
+                      <Ionicons name="time-outline" size={16} color="#3b82f6" />
+                    </View>
+                    <View style={styles.detailContent}>
+                      <Text style={styles.detailLabel}>Duration</Text>
+                      <Text style={styles.detailValue}>
+                        {userData.planDuration} month
+                        {userData.planDuration > 1 ? "s" : ""}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {userData?.timeSlot && (
+                  <View style={styles.detailRowWithIcon}>
+                    <View
+                      style={[
+                        styles.iconCircleSmall,
+                        {
+                          backgroundColor:
+                            getTimeSlotColor(userData.timeSlot) + "20",
+                        },
+                      ]}
+                    >
+                      <Ionicons
+                        name={getTimeSlotIcon(userData.timeSlot)}
+                        size={16}
+                        color={getTimeSlotColor(userData.timeSlot)}
+                      />
+                    </View>
+                    <View style={styles.detailContent}>
+                      <Text style={styles.detailLabel}>Time Slot</Text>
+                      <Text style={styles.detailValue}>
+                        {getTimeSlotDisplay(userData.timeSlot)}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {userData?.paymentMethod && (
+                  <View style={styles.detailRowWithIcon}>
+                    <View style={styles.iconCircleSmall}>
+                      <Ionicons
+                        name="wallet-outline"
+                        size={16}
+                        color="#10b981"
+                      />
+                    </View>
+                    <View style={styles.detailContent}>
+                      <Text style={styles.detailLabel}>Payment Method</Text>
+                      <Text style={styles.detailValue}>
+                        {userData.paymentMethod === "offline"
+                          ? "Pay at Gym (Offline)"
+                          : "Online Payment"}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {userData?.enrolledAt && (
+                  <View style={styles.detailRowWithIcon}>
+                    <View style={styles.iconCircleSmall}>
+                      <Ionicons
+                        name="calendar-outline"
+                        size={16}
+                        color="#a855f7"
+                      />
+                    </View>
+                    <View style={styles.detailContent}>
+                      <Text style={styles.detailLabel}>Request Date</Text>
+                      <Text style={styles.detailValue}>
+                        {userData.enrolledAt.toLocaleDateString("en-US", {
+                          weekday: "long",
+                          year: "numeric",
+                          month: "long",
+                          day: "numeric",
+                        })}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            {userData?.transactionId && (
+              <View style={styles.planSection}>
+                <View style={styles.planSectionHeader}>
+                  <Ionicons name="receipt-outline" size={20} color="#f97316" />
+                  <Text style={styles.planSectionTitle}>
+                    Transaction Details
+                  </Text>
+                </View>
+                <View style={styles.detailCard}>
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Transaction ID</Text>
+                    <TouchableOpacity
+                      onPress={() =>
+                        copyToClipboard(userData.transactionId || "")
+                      }
+                      style={styles.copyButton}
+                    >
+                      <Text style={styles.transactionId}>
+                        {userData.transactionId}
+                      </Text>
+                      <Ionicons name="copy-outline" size={16} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            <View style={styles.planSection}>
+              <View style={styles.planSectionHeader}>
+                <Ionicons
+                  name="information-circle-outline"
+                  size={20}
+                  color="#fbbf24"
+                />
+                <Text style={styles.planSectionTitle}>Next Steps</Text>
+              </View>
+              <View style={styles.instructionsCard}>
+                <View style={styles.instructionItem}>
+                  <View style={styles.instructionNumber}>
+                    <Text style={styles.instructionNumberText}>1</Text>
+                  </View>
+                  <Text style={styles.instructionText}>
+                    Visit the gym to complete payment (if not done already)
+                  </Text>
+                </View>
+                <View style={styles.instructionItem}>
+                  <View style={styles.instructionNumber}>
+                    <Text style={styles.instructionNumberText}>2</Text>
+                  </View>
+                  <Text style={styles.instructionText}>
+                    Show your enrollment details to gym staff
+                  </Text>
+                </View>
+                <View style={styles.instructionItem}>
+                  <View style={styles.instructionNumber}>
+                    <Text style={styles.instructionNumberText}>3</Text>
+                  </View>
+                  <Text style={styles.instructionText}>
+                    Wait for admin approval (usually within 24 hours)
+                  </Text>
+                </View>
+                <View style={styles.instructionItem}>
+                  <View style={styles.instructionNumber}>
+                    <Text style={styles.instructionNumberText}>4</Text>
+                  </View>
+                  <Text style={styles.instructionText}>
+                    Once approved, you can start checking in!
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.contactCard}>
+              <Ionicons name="help-circle-outline" size={24} color="#3b82f6" />
+              <View style={styles.contactContent}>
+                <Text style={styles.contactTitle}>Need Help?</Text>
+                <Text style={styles.contactText}>
+                  If you have questions about your enrollment, contact the gym
+                  directly or reach out to support.
+                </Text>
+              </View>
+            </View>
+          </ScrollView>
+
+          <View style={styles.planModalFooter}>
+            <TouchableOpacity
+              style={styles.closePlanModalButton}
+              onPress={() => setShowPlanDetailsModal(false)}
+            >
+              <Text style={styles.closePlanModalText}>Close</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.refreshPlanButton}
+              onPress={() => {
+                setShowPlanDetailsModal(false);
+                handleRefreshStatus();
+              }}
+            >
+              <Ionicons name="refresh-outline" size={18} color="#0a0f1a" />
+              <Text style={styles.refreshPlanButtonText}>Check Status</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <StatusBar barStyle="light-content" backgroundColor="#0a0f1a" />
+        <ActivityIndicator size="large" color="#4ade80" />
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (userData?.enrollmentStatus === "pending") {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="#0a0f1a" />
+        <View style={styles.accentCircleOne} />
+        <View style={styles.accentCircleTwo} />
+        <View style={styles.emptyContainer}>
+          <View style={styles.iconContainer}>
+            <View style={styles.iconCircle}>
+              <Ionicons name="time-outline" size={64} color="#fbbf24" />
+            </View>
+          </View>
+          <Text style={styles.emptyTitle}>Enrollment Pending</Text>
+          <Text style={styles.emptySubtext}>
+            Your enrollment request is being reviewed by the gym admin. You'll
+            be able to check-in once approved.
+          </Text>
+
+          <TouchableOpacity
+            style={styles.viewPlanButton}
+            onPress={() => setShowPlanDetailsModal(true)}
+          >
+            <Ionicons name="eye-outline" size={20} color="#0a0f1a" />
+            <Text style={styles.viewPlanButtonText}>View Plan Details</Text>
+          </TouchableOpacity>
+
+          <View style={styles.statusCard}>
+            <View style={styles.statusRow}>
+              <Text style={styles.statusLabel}>Status</Text>
+              <View style={styles.pendingBadge}>
+                <Text style={styles.pendingBadgeText}>
+                  Pending Verification
+                </Text>
+              </View>
+            </View>
+
+            {userData?.paymentMethod && (
+              <>
+                <View style={styles.divider} />
+                <View style={styles.quickSummaryRow}>
+                  <Ionicons name="calendar-outline" size={18} color="#4ade80" />
+                  <Text style={styles.quickSummaryText}>
+                    Plan: {getPlanName(userData.paymentMethod)}
+                  </Text>
+                </View>
+              </>
+            )}
+
+            {userData?.timeSlot && (
+              <View style={styles.quickSummaryRow}>
+                <Ionicons
+                  name={getTimeSlotIcon(userData.timeSlot)}
+                  size={18}
+                  color={getTimeSlotColor(userData.timeSlot)}
+                />
+                <Text style={styles.quickSummaryText}>
+                  Time Slot: {userData.timeSlot}
+                </Text>
+              </View>
+            )}
+
+            {userData?.transactionId && (
+              <>
+                <View style={styles.divider} />
+                <View style={styles.quickSummaryRow}>
+                  <Ionicons
+                    name="document-text-outline"
+                    size={18}
+                    color="#a855f7"
+                  />
+                  <Text style={styles.quickSummaryText}>
+                    Transaction ID: {userData.transactionId.substring(0, 8)}...
+                  </Text>
+                </View>
+              </>
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={styles.refreshButton}
+            onPress={handleRefreshStatus}
+          >
+            <Ionicons name="refresh-outline" size={20} color="#e9eef7" />
+            <Text style={styles.refreshButtonText}>Check Status</Text>
+          </TouchableOpacity>
+        </View>
+
+        {renderPlanDetailsModal()}
+      </View>
+    );
+  }
+
+  if (userData?.enrollmentStatus === "none" || !userData?.gymId) {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="#0a0f1a" />
+        <View style={styles.accentCircleOne} />
+        <View style={styles.accentCircleTwo} />
+        <View style={styles.emptyContainer}>
+          <Ionicons name="fitness-outline" size={80} color="#64748b" />
+          <Text style={styles.emptyTitle}>No Gym Enrolled</Text>
+          <Text style={styles.emptySubtext}>
+            Browse available gyms on the Home tab and join one to get started!
+          </Text>
+          <TouchableOpacity
+            style={styles.browseButton}
+            onPress={() => router.push("/(member)/home")}
+          >
+            <Ionicons name="search" size={20} color="#0a0f1a" />
+            <Text style={styles.browseButtonText}>Browse Gyms</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  if (userData?.enrollmentStatus === "rejected") {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="light-content" backgroundColor="#0a0f1a" />
+        <View style={styles.accentCircleOne} />
+        <View style={styles.accentCircleTwo} />
+        <View style={styles.emptyContainer}>
+          <Ionicons name="close-circle-outline" size={80} color="#f87171" />
+          <Text style={styles.emptyTitle}>Enrollment Rejected</Text>
+          <Text style={styles.emptySubtext}>
+            Your enrollment request was rejected. Please contact the gym for
+            more information.
+          </Text>
+          <TouchableOpacity
+            style={styles.browseButton}
+            onPress={() => router.push("/(member)/home")}
+          >
+            <Text style={styles.browseButtonText}>Browse Other Gyms</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#0a0f1a" />
+      <View style={styles.accentCircleOne} />
+      <View style={styles.accentCircleTwo} />
+
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.greeting}>{getGreeting()},</Text>
+            <Text style={styles.userName}>
+              {userData?.displayName || "Member"}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.gymCard}>
+          <Ionicons name="barbell-outline" size={24} color="#4ade80" />
+          <View style={styles.gymInfo}>
+            <Text style={styles.gymName}>{gym?.name || "Loading..."}</Text>
+            <Text style={styles.gymAddress}>
+              {gym?.address || "Loading..."}
+            </Text>
+            <Text style={styles.activeMembersText}>
+              {activeCheckInsCount}{" "}
+              {activeCheckInsCount === 1 ? "member" : "members"} currently
+              active • {currentTimeSlot} Slot
+            </Text>
+          </View>
+        </View>
+
+        <TouchableOpacity
+          style={[
+            styles.checkInBtn,
+            isCheckedIn && styles.checkOutBtn,
+            checkoutSuccess && styles.checkoutSuccessBtn,
+          ]}
+          onPress={isCheckedIn ? handleCheckOutPress : handleCheckInPress}
+        >
+          <Ionicons
+            name={isCheckedIn ? "exit-outline" : "enter-outline"}
+            size={40}
+            color="#0a0f1a"
+          />
+          <Text
+            style={[
+              styles.checkInText,
+              checkoutSuccess && styles.checkoutSuccessText,
+            ]}
+          >
+            {isCheckedIn
+              ? checkOutConfirm
+                ? "Tap Again to Confirm"
+                : checkoutSuccess
+                  ? "Checked Out Successfully!"
+                  : "Check Out"
+              : checkInConfirm
+                ? "Tap Again to Confirm"
+                : "Check In"}
+          </Text>
+          <Text
+            style={[
+              styles.checkInSubtext,
+              checkoutSuccess && styles.checkoutSuccessSubtext,
+            ]}
+          >
+            {isCheckedIn
+              ? checkOutConfirm
+                ? "Confirm your checkout"
+                : checkoutSuccess
+                  ? "Great workout! See you next time! ✓"
+                  : `Session: ${formatTime(timerSeconds)}`
+              : checkInConfirm
+                ? "Confirm to start your workout"
+                : "Tap to start your workout"}
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.statsGrid}>
+          <View style={styles.statCard}>
+            <Ionicons name="flame-outline" size={28} color="#f97316" />
+            <Text style={styles.statNumber}>{streak}</Text>
+            <Text style={styles.statLabel}>Day Streak</Text>
+          </View>
+
+          <View style={styles.statCard}>
+            <Ionicons name="time-outline" size={28} color="#a855f7" />
+            <Text style={styles.statNumber}>
+              {formatTime(Math.floor(totalDuration))}
+            </Text>
+            <Text style={styles.statLabel}>Total Time</Text>
+          </View>
+
+          <View style={styles.statCard}>
+            <Ionicons name="people-outline" size={28} color="#3b82f6" />
+            <Text style={styles.statNumber}>{activeCheckInsCount}</Text>
+            <Text style={styles.statLabel}>Active Now</Text>
+          </View>
+        </View>
+
+        <View style={styles.buttonsContainer}>
+          <TouchableOpacity
+            style={styles.timeSlotBtn}
+            onPress={() => router.push("/(member)/time-slot")}
+          >
+            <View style={styles.buttonInner}>
+              <Ionicons name="time-outline" size={22} color="#8b5cf6" />
+              <Text style={styles.timeSlotBtnText}>Time Slot</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#64748b" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.activityBtn}
+            onPress={() => router.push("/(member)/activity-log")}
+          >
+            <View style={styles.buttonInner}>
+              <Ionicons name="calendar-outline" size={22} color="#3b82f6" />
+              <Text style={styles.activityBtnText}>Activity Log</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#64748b" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.reportButton}
+            onPress={() => setShowReportModal(true)}
+          >
+            <View style={styles.buttonInner}>
+              <Ionicons name="flag-outline" size={22} color="#fbbf24" />
+              <Text style={styles.reportButtonText}>Report an Issue</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#64748b" />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.leaveButton} onPress={handleLeaveGym}>
+            <View style={styles.buttonInner}>
+              <Ionicons name="exit-outline" size={22} color="#f87171" />
+              <Text style={styles.leaveButtonText}>Leave Gym</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
+
+      <Modal visible={showReportModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Report an Issue</Text>
+              <TouchableOpacity onPress={() => setShowReportModal(false)}>
+                <Ionicons name="close" size={28} color="#e9eef7" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView>
+              <Text style={styles.modalSectionTitle}>
+                Select Issue Type
+                {selectedIssues.length > 0 &&
+                  ` (${selectedIssues.length} selected)`}
+              </Text>
+
+              {(
+                [
+                  "Equipment",
+                  "Cleanliness",
+                  "Staff",
+                  "Safety",
+                  "Other",
+                ] as IssueType[]
+              ).map((issue) => (
+                <TouchableOpacity
+                  key={issue}
+                  style={[
+                    styles.issueOption,
+                    selectedIssues.includes(issue) &&
+                      styles.issueOptionSelected,
+                  ]}
+                  onPress={() => handleIssueToggle(issue)}
+                >
+                  <Ionicons
+                    name={
+                      issue === "Equipment"
+                        ? "barbell"
+                        : issue === "Cleanliness"
+                          ? "water"
+                          : issue === "Staff"
+                            ? "people"
+                            : issue === "Safety"
+                              ? "warning"
+                              : "ellipsis-horizontal"
+                    }
+                    size={24}
+                    color={
+                      selectedIssues.includes(issue) ? "#4ade80" : "#64748b"
+                    }
+                  />
+                  <Text style={styles.issueOptionText}>{issue}</Text>
+                  {selectedIssues.includes(issue) && (
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={24}
+                      color="#4ade80"
+                    />
+                  )}
+                </TouchableOpacity>
+              ))}
+
+              <Text style={styles.modalSectionTitle}>Description</Text>
+              <TextInput
+                style={styles.descriptionInput}
+                placeholder="Describe the issue(s) in detail..."
+                placeholderTextColor="#64748b"
+                value={reportDescription}
+                onChangeText={setReportDescription}
+                multiline
+                numberOfLines={4}
+                textAlignVertical="top"
+              />
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[
+                styles.submitButton,
+                (selectedIssues.length === 0 || submittingReport) &&
+                  styles.submitButtonDisabled,
+              ]}
+              onPress={handleSubmitReport}
+              disabled={selectedIssues.length === 0 || submittingReport}
+            >
+              {submittingReport ? (
+                <ActivityIndicator color="#0a0f1a" />
+              ) : (
+                <Text style={styles.submitButtonText}>Submit Report</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+};
+
+export default MyGym;
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#0a0f1a",
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
+  },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: "#0a0f1a",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0,
+  },
+  loadingText: { color: "#94a3b8", marginTop: 16, fontSize: 16 },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: width * 0.1,
+  },
+  iconContainer: { marginBottom: 24 },
+  iconCircle: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "rgba(251, 191, 36, 0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: "#e9eef7",
+    marginTop: 20,
+    textAlign: "center",
+  },
+  emptySubtext: {
+    fontSize: 15,
+    color: "#64748b",
+    marginTop: 12,
+    textAlign: "center",
+    lineHeight: 22,
+  },
+
+  viewPlanButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#fbbf24",
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 20,
+    marginBottom: 16,
+  },
+  viewPlanButtonText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0a0f1a",
+  },
+
+  statusCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderRadius: 20,
+    padding: 20,
+    width: "100%",
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  statusRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  statusLabel: { fontSize: 14, color: "#64748b" },
+  statusValue: { fontSize: 14, fontWeight: "600", color: "#e9eef7" },
+  pendingBadge: {
+    backgroundColor: "rgba(251, 191, 36, 0.15)",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  pendingBadgeText: { fontSize: 12, fontWeight: "700", color: "#fbbf24" },
+
+  quickSummaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 10,
+  },
+  quickSummaryText: {
+    fontSize: 14,
+    color: "#e9eef7",
+    fontWeight: "500",
+  },
+
+  divider: {
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    marginVertical: 14,
+  },
+  refreshButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "rgba(30, 41, 59, 0.8)",
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  refreshButtonText: { fontSize: 16, fontWeight: "600", color: "#e9eef7" },
+  browseButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#4ade80",
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginTop: 24,
+  },
+  browseButtonText: { fontSize: 16, fontWeight: "700", color: "#0a0f1a" },
+  scrollContent: {
+    paddingHorizontal: width * 0.05,
+    paddingTop: height * 0.02,
+    paddingBottom: height * 0.05,
+  },
+  accentCircleOne: {
+    position: "absolute",
+    width: width * 0.6,
+    height: width * 0.6,
+    borderRadius: width * 0.3,
+    backgroundColor: "rgba(74, 222, 128, 0.06)",
+    top: -width * 0.2,
+    right: -width * 0.2,
+  },
+  accentCircleTwo: {
+    position: "absolute",
+    width: width * 0.4,
+    height: width * 0.4,
+    borderRadius: width * 0.2,
+    backgroundColor: "rgba(59, 130, 246, 0.05)",
+    bottom: height * 0.3,
+    left: -width * 0.15,
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: height * 0.025,
+  },
+  greeting: { fontSize: 16, color: "#94a3b8" },
+  userName: {
+    fontSize: isSmall ? 24 : 28,
+    fontWeight: "700",
+    color: "#e9eef7",
+  },
+  gymCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: height * 0.025,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  gymInfo: { flex: 1, marginLeft: 12 },
+  gymName: { fontSize: 16, fontWeight: "600", color: "#e9eef7" },
+  gymAddress: { fontSize: 13, color: "#64748b", marginTop: 2 },
+  activeMembersText: {
+    fontSize: 12,
+    color: "#4ade80",
+    marginTop: 4,
+  },
+  checkInBtn: {
+    backgroundColor: "#4ade80",
+    borderRadius: 24,
+    paddingVertical: height * 0.04,
+    alignItems: "center",
+    marginBottom: height * 0.025,
+    shadowColor: "#4ade80",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  checkOutBtn: { backgroundColor: "#f97316", shadowColor: "#f97316" },
+  checkoutSuccessBtn: { backgroundColor: "#10b981", shadowColor: "#10b981" },
+  checkInText: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#0a0f1a",
+    marginTop: 8,
+    textAlign: "center",
+  },
+  checkoutSuccessText: { color: "#0a0f1a" },
+  checkInSubtext: {
+    fontSize: 14,
+    color: "rgba(10, 15, 26, 0.7)",
+    marginTop: 4,
+    textAlign: "center",
+  },
+  checkoutSuccessSubtext: { color: "rgba(10, 15, 26, 0.8)", fontWeight: "600" },
+  statsGrid: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: height * 0.025,
+    gap: 10,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderRadius: 16,
+    padding: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  statNumber: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#e9eef7",
+    marginTop: 8,
+  },
+  statLabel: { fontSize: 11, color: "#64748b", marginTop: 4 },
+  buttonsContainer: { gap: 12, marginBottom: 30 },
+  buttonInner: { flexDirection: "row", alignItems: "center", gap: 10 },
+  timeSlotBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(139, 92, 246, 0.1)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderWidth: 1,
+    borderColor: "rgba(139, 92, 246, 0.2)",
+  },
+  timeSlotBtnText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#8b5cf6",
+    flex: 1,
+  },
+  activityBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(59, 130, 246, 0.1)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderWidth: 1,
+    borderColor: "rgba(59, 130, 246, 0.2)",
+  },
+  activityBtnText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#3b82f6",
+    flex: 1,
+  },
+  reportButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(251, 191, 36, 0.1)",
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderWidth: 1,
+    borderColor: "rgba(251, 191, 36, 0.2)",
+  },
+  reportButtonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#fbbf24",
+    flex: 1,
+  },
+  leaveButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(248, 113, 113, 0.1)",
+    borderRadius: 14,
+    paddingVertical: 16,
+    borderWidth: 1,
+    borderColor: "rgba(248, 113, 113, 0.2)",
+  },
+  leaveButtonText: { fontSize: 16, fontWeight: "600", color: "#f87171" },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.7)",
+    justifyContent: "flex-end",
+  },
+  modalContent: {
+    backgroundColor: "#0a0f1a",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: height * 0.85,
+    paddingBottom: Platform.OS === "ios" ? 34 : 20,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.06)",
+  },
+  modalTitle: { fontSize: 20, fontWeight: "700", color: "#e9eef7" },
+  modalSectionTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#e9eef7",
+    marginTop: 20,
+    marginBottom: 12,
+    marginHorizontal: 20,
+  },
+  issueOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    marginHorizontal: 20,
+    marginBottom: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  issueOptionSelected: {
+    borderColor: "#4ade80",
+    backgroundColor: "rgba(74, 222, 128, 0.05)",
+  },
+  issueOptionText: { flex: 1, fontSize: 16, color: "#e9eef7", marginLeft: 12 },
+  descriptionInput: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    marginHorizontal: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    color: "#e9eef7",
+    fontSize: 16,
+    minHeight: 120,
+    marginBottom: 20,
+  },
+  submitButton: {
+    backgroundColor: "#4ade80",
+    marginHorizontal: 20,
+    paddingVertical: 16,
+    borderRadius: 14,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  submitButtonDisabled: { backgroundColor: "#374151", opacity: 0.5 },
+  submitButtonText: { fontSize: 16, fontWeight: "700", color: "#0a0f1a" },
+
+  planModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.8)",
+    justifyContent: "flex-end",
+  },
+  planModalContent: {
+    backgroundColor: "#0a0f1a",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: height * 0.9,
+  },
+  planModalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.06)",
+  },
+  planModalTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#e9eef7",
+    flex: 1,
+  },
+  planModalCloseButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  planModalScroll: {
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+  },
+  planSection: {
+    marginTop: 24,
+  },
+  planSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 16,
+  },
+  planSectionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#e9eef7",
+  },
+  statusBadgeContainer: {
+    backgroundColor: "rgba(251, 191, 36, 0.1)",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "rgba(251, 191, 36, 0.2)",
+  },
+  pendingStatusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "rgba(251, 191, 36, 0.2)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    alignSelf: "flex-start",
+    marginBottom: 12,
+  },
+  pendingStatusText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#fbbf24",
+  },
+  statusDescription: {
+    fontSize: 14,
+    color: "#94a3b8",
+    lineHeight: 20,
+  },
+  detailCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  detailRow: {
+    marginBottom: 16,
+  },
+  detailRowWithIcon: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  iconCircleSmall: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  detailContent: {
+    flex: 1,
+  },
+  detailLabel: {
+    fontSize: 13,
+    color: "#64748b",
+    marginBottom: 4,
+  },
+  detailValue: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#e9eef7",
+  },
+  copyButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginTop: 6,
+  },
+  transactionId: {
+    fontSize: 14,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+    color: "#e9eef7",
+    flex: 1,
+  },
+  instructionsCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  instructionItem: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 16,
+  },
+  instructionNumber: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "rgba(74, 222, 128, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  instructionNumberText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#4ade80",
+  },
+  instructionText: {
+    flex: 1,
+    fontSize: 14,
+    color: "#94a3b8",
+    lineHeight: 20,
+  },
+  contactCard: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    backgroundColor: "rgba(59, 130, 246, 0.1)",
+    borderRadius: 16,
+    padding: 20,
+    marginTop: 20,
+    borderWidth: 1,
+    borderColor: "rgba(59, 130, 246, 0.2)",
+  },
+  contactContent: {
+    flex: 1,
+  },
+  contactTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#3b82f6",
+    marginBottom: 6,
+  },
+  contactText: {
+    fontSize: 14,
+    color: "#94a3b8",
+    lineHeight: 20,
+  },
+  planModalFooter: {
+    flexDirection: "row",
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingBottom: Platform.OS === "ios" ? 34 : 16,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+    gap: 12,
+  },
+  closePlanModalButton: {
+    flex: 1,
+    backgroundColor: "rgba(30, 41, 59, 0.8)",
+    paddingVertical: 16,
+    borderRadius: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  closePlanModalText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#e9eef7",
+  },
+  refreshPlanButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#4ade80",
+    paddingVertical: 16,
+    borderRadius: 14,
+  },
+  refreshPlanButtonText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0a0f1a",
+  },
+});
